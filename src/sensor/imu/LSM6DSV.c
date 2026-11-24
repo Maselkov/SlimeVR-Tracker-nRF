@@ -404,10 +404,12 @@ int lsm_ext_setup(sensor_ext_mode_t mode, const sensor_mag_t *mag, uint8_t mag_a
 			}
 			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x58); // SHUB_PU_EN, INT H_LACTIVE active low, PP_OD open-drain
 			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x80); // RST_MASTER_REGS, reset master logic left over from one-shot transactions
+			k_usleep(300);
 			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master while configuring
 			uint8_t slv0[3] = {(mag_addr << 1) | 0x01, mag->ext_burst_reg, (sel_odr << 5) | total_bytes}; // read, start register, SHUB_ODR, number of bytes
 			err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
-			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x04); // MASTER_ON, one slave, continuous
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x44); // WRITE_ONCE (required for reads), MASTER_ON, one slave
 			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
 			if (err)
 				break;
