@@ -31,6 +31,11 @@ uint8_t last_gyro_odr = 0xff;
 
 static float freq_scale = 1; // ODR is scaled by INTERNAL_FREQ_FINE
 
+static const sensor_mag_t *ext_mag = NULL; // set only in autonomous sensor hub mode
+static int64_t ext_mag_interval_ms = 0;
+static int64_t ext_mag_last_time = 0;
+#define EXT_MAG_TAG 0x70 // artificial entry tag for magnetometer data read outside of FIFO
+
 LOG_MODULE_REGISTER(LSM6DSV, LOG_LEVEL_DBG);
 
 int lsm_init(float clock_rate, float accel_time, float gyro_time, float *accel_actual_time, float *gyro_actual_time)
@@ -179,8 +184,28 @@ int lsm_update_odr(float accel_time, float gyro_time, float *accel_actual_time, 
 
 uint16_t lsm_data_read(uint8_t *data, uint16_t len)
 {
+	uint16_t total = 0;
+	int err = 0;
+	if (ext_mag && len >= PACKET_SIZE && k_uptime_get() - ext_mag_last_time >= ext_mag_interval_ms)
+	{
+		// sensor hub is reading the magnetometer autonomously, fetch the latest result
+		uint8_t status = 0;
+		err |= ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &status);
+		if (status & 0x01) // SENS_HUB_ENDOP
+		{
+			data[0] = EXT_MAG_TAG;
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+			err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1 + ext_mag->ext_dummy_bytes, &data[1], ext_mag->ext_burst);
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+			ext_mag_last_time = k_uptime_get();
+			data += PACKET_SIZE;
+			len -= PACKET_SIZE;
+			total++;
+		}
+	}
+
 	uint8_t rawCount[2] = {0};
-	int err = ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, &rawCount[0], 2);
+	err |= ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FIFO_STATUS1, &rawCount[0], 2);
 
 	uint16_t count = (uint16_t)((rawCount[1] & 3) << 8 | rawCount[0]); // Turn the 16 bits into a unsigned 16-bit value. Only LSB on FIFO_STATUS2 is used, but we mask 2nd bit too // TODO: might be 3 bits not 2
 
@@ -195,12 +220,21 @@ uint16_t lsm_data_read(uint8_t *data, uint16_t len)
 	if (err)
 		LOG_ERR("Communication error");
 
-	return count;
+	return count + total;
 }
 
 sensor_data_attrs_t lsm_data_process(uint16_t index, uint8_t *data, float a[3], float g[3], float m[3])
 {
 	index *= PACKET_SIZE;
+	if (data[index] == EXT_MAG_TAG) // magnetometer entry read from sensor hub registers
+	{
+		if (ext_mag)
+		{
+			ext_mag->mag_process(&data[index + 1], m);
+			return DATA_VALID_MAG | DATA_OUTSIDE_FIFO;
+		}
+		return DATA_OUTSIDE_FIFO;
+	}
 	switch (data[index] >> 3)
 	{
 	case 0x02: // Accelerometer NC (Accelerometer uncompressed data)
@@ -302,6 +336,7 @@ uint8_t lsm_setup_WOM(void)
 
 int lsm_ext_setup(sensor_ext_mode_t mode, const sensor_mag_t *mag, uint8_t mag_addr) {
 	int err = 0;
+	ext_mag = NULL; // only autonomous mode will set this
 	switch (mode) {
 		case SENSOR_EXT_MODE_OFF:
 			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
@@ -333,7 +368,39 @@ int lsm_ext_setup(sensor_ext_mode_t mode, const sensor_mag_t *mag, uint8_t mag_a
 		}
 
 		case SENSOR_EXT_MODE_I2CM_AUTONOMOUS:
-			return -1;
+		{
+			// continuous sensor hub read of the magnetometer data registers (AN5922, sensor hub mode)
+			if (mag == NULL || mag->ext_burst == 0)
+				return -1;
+			const uint8_t total_bytes = mag->ext_burst + mag->ext_dummy_bytes;
+			if (total_bytes > 7 || mag->ext_burst > PACKET_SIZE - 1)
+				return -1; // SLAVE0_NUMOP is 3 bits, data must fit in one packet entry
+			// select sensor hub ODR just higher or equal to magnetometer ODR (limited by accelerometer ODR)
+			const float shub_intervals[] = {1.0f/1.875f, 1.0f/15, 1.0f/30, 1.0f/60, 1.0f/120, 1.0f/240, 1.0f/480};
+			const float mag_interval = mag->get_odr();
+			uint8_t sel_odr;
+			for (sel_odr = 0; sel_odr < ARRAY_SIZE(shub_intervals) - 1; sel_odr++)
+			{
+				if (shub_intervals[sel_odr] <= mag_interval)
+					break;
+			}
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_IF_CFG, 0x58); // SHUB_PU_EN, INT H_LACTIVE active low, PP_OD open-drain
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40); // switch to sensor hub registers
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x00); // disable I2C master while configuring
+			uint8_t slv0[3] = {(mag_addr << 1) | 0x01, mag->ext_burst_reg, (sel_odr << 5) | total_bytes}; // read, start register, SHUB_ODR, number of bytes
+			err |= ssi_burst_write(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, slv0, 3);
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, 0x04); // MASTER_ON, one slave, continuous
+			err |= ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00); // switch to normal registers
+			if (err)
+				break;
+			ext_mag_interval_ms = (int64_t)(mag_interval * 1000) - 2; // fetch each new sample, slightly early
+			if (ext_mag_interval_ms < 0)
+				ext_mag_interval_ms = 0;
+			ext_mag_last_time = 0;
+			ext_mag = mag;
+			LOG_INF("Sensor hub autonomous magnetometer read enabled, SHUB ODR setting %u", sel_odr);
+			break;
+		}
 	}
 
 	if (err) {
