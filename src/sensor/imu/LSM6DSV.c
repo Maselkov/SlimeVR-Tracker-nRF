@@ -186,24 +186,6 @@ uint16_t lsm_data_read(uint8_t *data, uint16_t len)
 {
 	uint16_t total = 0;
 	int err = 0;
-#if 1 // TEMP DEBUG: dump sensor hub state once per second
-	static int64_t shub_dbg_time = 0;
-	if (ext_mag && k_uptime_get() - shub_dbg_time > 1000)
-	{
-		shub_dbg_time = k_uptime_get();
-		uint8_t st_main = 0, ctrl1 = 0;
-		uint8_t hub[7] = {0}, cfg[3] = {0}, mcfg = 0, st_master = 0;
-		ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER_MAINPAGE, &st_main);
-		ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_CTRL1, &ctrl1);
-		ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x40);
-		ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_MASTER_CONFIG, &mcfg);
-		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SLV0_ADD, cfg, 3);
-		ssi_reg_read_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_STATUS_MASTER, &st_master);
-		ssi_burst_read(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_SENSOR_HUB_1, hub, 7);
-		ssi_reg_write_byte(SENSOR_INTERFACE_DEV_IMU, LSM6DSV_FUNC_CFG_ACCESS, 0x00);
-		LOG_INF("SHUB dbg: CTRL1 %02X ST_MAIN %02X MCFG %02X SLV0 %02X %02X %02X ST_MASTER %02X HUB %02X %02X %02X %02X %02X %02X %02X", ctrl1, st_main, mcfg, cfg[0], cfg[1], cfg[2], st_master, hub[0], hub[1], hub[2], hub[3], hub[4], hub[5], hub[6]);
-	}
-#endif
 	if (ext_mag && len >= PACKET_SIZE && k_uptime_get() - ext_mag_last_time >= ext_mag_interval_ms)
 	{
 		// sensor hub is reading the magnetometer autonomously, fetch the latest result
