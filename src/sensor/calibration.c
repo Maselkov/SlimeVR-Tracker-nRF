@@ -465,11 +465,16 @@ static int sensor_calibrate_mag(void)
 	if (sensor_wait_mag(m, K_MSEC(1000)))
 		return -1; // Timeout
 	sensor_sample_mag_magneto_sample(aBuf, m); // 400us
+#if 1 // TEMP DEBUG: magnetometer calibration samples
+	if (((int)sample_count) % 10 == 1)
+		LOG_INF("MAGCAL dbg: n %d m %.4f %.4f %.4f |m| avg %.4f a %.2f %.2f %.2f", (int)sample_count, (double)m[0], (double)m[1], (double)m[2], norm_sum / sample_count, (double)aBuf[0], (double)aBuf[1], (double)aBuf[2]);
+#endif
 	if (magneto_progress != 0b11111111)
 		return 3; // signal to wait 100ms
 
 	float m_inv[4][3];
 	LOG_INF("Calibrating magnetometer hard/soft iron offset");
+	LOG_INF("MAGCAL dbg: samples %d, mean |m| %.4f", (int)sample_count, norm_sum / sample_count);
 
 	// max allocated 1072 bytes
 #if DEBUG
